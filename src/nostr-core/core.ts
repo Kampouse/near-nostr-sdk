@@ -40,24 +40,20 @@ export type SubscribeOptions = {
   relays?: string[];
 };
 
-// ── Pool (shared singleton) ──
-
-let _pool: SimplePool | null = null;
-
-function getPool(): SimplePool {
-  if (!_pool) _pool = new SimplePool();
-  return _pool;
-}
-
 // ── NostrCore ──
 
 export class NostrCore {
   #relays: string[];
-  pool: SimplePool;
+  readonly pool: SimplePool;
 
   constructor(config: NostrCoreConfig) {
     this.#relays = config.relays;
-    this.pool = getPool();
+    this.pool = new SimplePool();
+  }
+
+  /** Close all relay connections. Call when done using this instance. */
+  close(): void {
+    this.pool.close(this.#relays);
   }
 
   get relays(): string[] {
@@ -74,9 +70,21 @@ export class NostrCore {
 
   // ── Publish ──
 
-  async publishEvent(opts: PublishOptions): Promise<void> {
+  async publishEvent(opts: PublishOptions): Promise<Map<string, boolean>> {
     const relays = opts.relays ?? this.#relays;
-    await this.pool.publish(relays, opts.event as any);
+    const results = this.pool.publish(relays, opts.event as any);
+    const statuses = new Map<string, boolean>();
+    await Promise.allSettled(
+      results.map(async (p, i) => {
+        try {
+          await p;
+          statuses.set(relays[i], true);
+        } catch {
+          statuses.set(relays[i], false);
+        }
+      }),
+    );
+    return statuses;
   }
 
   // ── Query ──

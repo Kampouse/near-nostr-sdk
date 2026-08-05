@@ -39,9 +39,10 @@ function buildTargetTags(target: NearNostrTarget, clientName: string): string[][
 }
 
 function targetFilterTags(target: NearNostrTarget): NostrFilter {
+  // Some relays reject unknown custom tags in filters.
+  // Use standard tags for relay query, filter near_target client-side.
   return {
     kinds: [1],
-    "#near_target": [`${target.type}:${target.id}`],
     "#t": [target.type, "nearbuilders"],
     limit: 100,
   };
@@ -135,8 +136,7 @@ export class NearNostr {
 
     const event = finalizeEvent(template as any, opts.nostrSecretKey);
 
-    const relays = opts.relays ?? this.config.relays;
-    await this.core.publishEvent({ event: event as unknown as NostrEvent, relays });
+    await this.core.publishEvent({ event: event as unknown as NostrEvent, relays: opts.relays ?? this.config.relays });
 
     return event as unknown as NostrEvent;
   }
@@ -157,7 +157,14 @@ export class NearNostr {
     });
 
     const comments: NearNostrComment[] = [];
+    const targetKey = `${opts.target.type}:${opts.target.id}`;
     for (const event of events) {
+      // Client-side filter: match near_target tag
+      const hasTarget = event.tags.some(
+        (t) => t[0] === "near_target" && t[1] === targetKey,
+      );
+      if (!hasTarget) continue;
+
       const parentTag = event.tags.find(
         (t) => t[0] === "e" && t[3] === "reply",
       );
