@@ -65,14 +65,65 @@ export class NearNostr {
 
   // ── Identity: link NEAR account → Nostr pubkey ──
 
-  async linkAccountWithSigner(opts: {
+  /**
+   * Generate a binding challenge for a NEAR account.
+   * Client signs this with their nsec, returns the signature to the server.
+   */
+  createBindingChallenge(nearAccountId: string): { challenge: string; expiresAt: number } {
+    const expiresAt = Math.floor(Date.now() / 1000) + 300; // 5 min
+    const challenge = `bind:${nearAccountId}:${expiresAt}:${this.config.clientName}`;
+    return { challenge, expiresAt };
+  }
+
+  /**
+   * Verify a Nostr signature against a binding challenge.
+   * The client should sign the challenge bytes with `nostr-tools/pure` getSignature.
+   * Returns the parsed challenge data if valid, throws if invalid/expired/forged.
+   */
+  verifyBindingChallenge(opts: {
+    nostrPubkey: string;
+    challenge: string;
+    signature: string; // hex-encoded 64-byte schnorr signature
+  }): { nearAccountId: string; expiresAt: number; clientName: string } {
+    const { schnorr } = require("@noble/curves/secp256k1");
+
+    const pub = Uint8Array.from(Buffer.from(opts.nostrPubkey, "hex"));
+    const sig = Uint8Array.from(Buffer.from(opts.signature, "hex"));
+    const msg = new TextEncoder().encode(opts.challenge);
+
+    const valid = schnorr.verify(sig, msg, pub);
+    if (!valid) {
+      throw new Error("Invalid Nostr signature for binding challenge");
+    }
+
+    const parts = opts.challenge.split(":");
+    if (parts.length !== 4 || parts[0] !== "bind") {
+      throw new Error("Malformed binding challenge");
+    }
+
+    const expiresAt = parseInt(parts[2], 10);
+    if (Math.floor(Date.now() / 1000) > expiresAt) {
+      throw new Error("Binding challenge expired");
+    }
+
+    return {
+      nearAccountId: parts[1],
+      expiresAt,
+      clientName: parts[3],
+    };
+  }
+
+  /**
+   * Build the KV contract call args for a binding.
+   * The caller must sign + send the NEAR transaction via wallet.
+   */
+  buildBindingArgs(opts: {
     nearAccountId: string;
     nostrPubkey: string;
-    proof: string;
+    proof: string; // the signed challenge JSON
     relay?: string;
-    signAndSend: (args: { contract: string; method: string; args: Record<string, string> }) => Promise<string>;
-  }): Promise<string> {
-    const txHash = await opts.signAndSend({
+  }): { contract: string; method: string; args: Record<string, string> } {
+    return {
       contract: this.config.bindingContract,
       method: "set",
       args: {
@@ -84,8 +135,7 @@ export class NearNostr {
           bound_at: Math.floor(Date.now() / 1000),
         }),
       },
-    });
-    return txHash;
+    };
   }
 
   // ── Identity: resolve Nostr pubkey from NEAR account ──
