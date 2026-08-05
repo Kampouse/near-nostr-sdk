@@ -1,5 +1,5 @@
-import { SimplePool } from "nostr-tools/pool";
-import { finalizeEvent, getEventHash } from "nostr-tools/pure";
+import WebSocket from "ws";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import type { NostrEvent, NostrFilter } from "../types.js";
 import type { NostrSubscription } from "../core.js";
 import type {
@@ -11,72 +11,193 @@ import type {
 } from "./types.js";
 
 // ── BuzzAdapter (NIP-29) ──
-
-// Publishes kind 9 (group messages) with #h (channel) tags.
-// Requires NIP-42 auth and channel membership.
-// Channel = one per target (e.g. "project:nearbuilders.org")
+// Raw WebSocket with NIP-42 auth. SimplePool doesn't support AUTH events.
 
 export type BuzzAdapterConfig = {
   relays: string[];
-  /** Auth handler — sign NIP-42 challenge event */
-  signAuth?: (challenge: string, relay: string) => Promise<string>; // returns event JSON string
-  /** Channel ID resolver — returns the #h channel UUID for a target */
+  secretKey: Uint8Array;
   resolveChannel: (target: string) => string;
+  connectTimeoutMs?: number;
+  queryTimeoutMs?: number;
 };
+
+type ConnState = "disconnected" | "connecting" | "authing" | "connected" | "failed";
 
 export class BuzzAdapter implements RelayAdapter {
   readonly type = "buzz" as const;
-  readonly pool: SimplePool;
-  #config: BuzzAdapterConfig;
-  #authenticated = new Set<string>();
+  readonly relays: string[];
+  readonly secretKey: Uint8Array;
+  readonly resolveChannel: (target: string) => string;
+  readonly connectTimeoutMs: number;
+  readonly queryTimeoutMs: number;
+  readonly pubkey: string;
+
+  #conns = new Map<string, WebSocket>();
+  #states = new Map<string, ConnState>();
+  #queries = new Map<string, { events: NostrEvent[]; eose: boolean; resolve: () => void }>();
 
   constructor(config: BuzzAdapterConfig) {
-    this.pool = new SimplePool();
-    this.#config = config;
+    this.relays = config.relays;
+    this.secretKey = config.secretKey;
+    this.resolveChannel = config.resolveChannel;
+    this.connectTimeoutMs = config.connectTimeoutMs ?? 10_000;
+    this.queryTimeoutMs = config.queryTimeoutMs ?? 8_000;
+    this.pubkey = getPublicKey(config.secretKey);
   }
 
-  // ── NIP-42 Auth ──
-
-  async #ensureAuth(relay: string): Promise<void> {
-    if (this.#authenticated.has(relay)) return;
-    // NIP-42: relay sends AUTH challenge, we sign and respond
-    // The pool handles the challenge internally when we connect.
-    // For NIP-29 relays, we set the auth function on the pool.
-    this.#authenticated.add(relay);
-  }
-
-  // ── Channel mapping ──
-
-  /** Get the #h channel UUID for a target */
   channelFor(target: string): string {
-    return this.#config.resolveChannel(target);
+    return this.resolveChannel(target);
   }
 
-  // ── Publish (kind 9) ──
+  // ── Connect + NIP-42 Auth ──
+
+  async connect(relay?: string): Promise<string> {
+    const url = relay ?? this.relays[0];
+    if (!url) throw new Error("No relays configured");
+
+    const state = this.#states.get(url);
+    if (state === "connected" || state === "authing") {
+      await this.#waitAuth(url);
+      return url;
+    }
+
+    this.#states.set(url, "connecting");
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#states.set(url, "failed");
+        ws.close();
+        reject(new Error(`Buzz connect timeout: ${url}`));
+      }, this.connectTimeoutMs);
+
+      const ws = new WebSocket(url);
+      this.#conns.set(url, ws);
+
+      ws.on("open", () => {
+        this.#states.set(url, "authing");
+      });
+
+      ws.on("message", (raw: Buffer) => {
+        this.#handle(url, ws, raw.toString());
+      });
+
+      ws.on("error", (err: Error) => {
+        clearTimeout(timer);
+        this.#states.set(url, "failed");
+        reject(err);
+      });
+
+      ws.on("close", () => {
+        clearTimeout(timer);
+        this.#states.set(url, "disconnected");
+      });
+
+      this.#waitAuth(url).then(() => {
+        clearTimeout(timer);
+        resolve(url);
+      }).catch(reject);
+    });
+  }
+
+  async #ensureConnected(relay?: string): Promise<string> {
+    const url = relay ?? this.relays[0];
+    if (this.#states.get(url) === "connected") return url;
+    return this.connect(url);
+  }
+
+  async #waitAuth(url: string): Promise<void> {
+    if (this.#states.get(url) === "connected") return;
+    if (this.#states.get(url) === "failed") throw new Error(`Connection failed: ${url}`);
+    return new Promise((resolve, reject) => {
+      const iv = setInterval(() => {
+        const s = this.#states.get(url);
+        if (s === "connected") { clearInterval(iv); resolve(); }
+        if (s === "failed") { clearInterval(iv); reject(new Error(`Auth failed: ${url}`)); }
+      }, 50);
+      setTimeout(() => { clearInterval(iv); reject(new Error("Auth timeout")); }, this.connectTimeoutMs);
+    });
+  }
+
+  // ── Message handling ──
+
+  #handle(relay: string, ws: WebSocket, raw: string): void {
+    let msg: unknown[];
+    try { msg = JSON.parse(raw); } catch { return; }
+    const t = msg[0] as string;
+
+    // AUTH challenge → sign + respond
+    if (t === "AUTH") {
+      const challenge = msg[1] as string;
+      const evt = finalizeEvent(
+        { kind: 22242, created_at: Math.floor(Date.now() / 1000), tags: [["relay", relay], ["challenge", challenge]], content: "" },
+        this.secretKey,
+      );
+      ws.send(JSON.stringify(["AUTH", evt]));
+      return;
+    }
+
+    // OK → track auth success
+    if (t === "OK") {
+      if (msg[2] === true && this.#states.get(relay) === "authing") {
+        this.#states.set(relay, "connected");
+      }
+      return;
+    }
+
+    // EVENT → route to pending query
+    if (t === "EVENT") {
+      const subId = msg[1] as string;
+      const q = this.#queries.get(subId);
+      if (q && !q.eose) q.events.push(msg[2] as unknown as NostrEvent);
+      return;
+    }
+
+    // EOSE → resolve query
+    if (t === "EOSE") {
+      const subId = msg[1] as string;
+      const q = this.#queries.get(subId);
+      if (q) { q.eose = true; q.resolve(); }
+      return;
+    }
+    // NOTICE, CLOSED — silently ignore
+  }
+
+  #send(relay: string, msg: unknown[]): void {
+    const ws = this.#conns.get(relay);
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error(`Not connected: ${relay}`);
+    ws.send(JSON.stringify(msg));
+  }
+
+  // ── RelayAdapter ──
 
   async publish(opts: PublishAdapterOptions): Promise<PublishResult> {
-    const relays = opts.relays ?? this.#config.relays;
+    const relays = opts.relays ?? this.relays;
     const channelId = this.channelFor(opts.target);
-    const tags = this.#buildTags(opts, channelId);
+    const tags: string[][] = [
+      ["h", channelId],
+      ["p", opts.pubkey],
+      ["client", opts.clientName],
+      ["near_target", opts.target],
+      ["t", opts.targetType],
+    ];
+    if (opts.nearAccountId) tags.push(["near_account", opts.nearAccountId]);
+    if (opts.parentEventId) tags.push(["e", opts.parentEventId, "", "reply"]);
+    if (opts.extraTags) tags.push(...opts.extraTags);
+
     const event = finalizeEvent(
-      {
-        kind: 9,  // NIP-29 group message
-        created_at: Math.floor(Date.now() / 1000),
-        tags,
-        content: opts.content,
-      },
+      { kind: 9, created_at: Math.floor(Date.now() / 1000), tags, content: opts.content },
       opts.secretKey,
     );
 
-    const results = this.pool.publish(relays, event as any);
     const statuses = new Map<string, boolean>();
     await Promise.allSettled(
-      results.map(async (p, i) => {
+      relays.map(async (r: string) => {
         try {
-          await p;
-          statuses.set(relays[i], true);
+          await this.#ensureConnected(r);
+          this.#send(r, ["EVENT", event]);
+          statuses.set(r, true);
         } catch {
-          statuses.set(relays[i], false);
+          statuses.set(r, false);
         }
       }),
     );
@@ -84,147 +205,144 @@ export class BuzzAdapter implements RelayAdapter {
     return { event: event as unknown as NostrEvent, statuses };
   }
 
-  // ── Query (kind 9 by #h) ──
-
   async query(opts: QueryAdapterOptions): Promise<{ events: NostrEvent[] }> {
-    const relays = opts.relays ?? this.#config.relays;
+    const relays = opts.relays ?? this.relays;
     const channelId = this.channelFor(opts.target);
-    const filter: NostrFilter = {
-      kinds: [9],
-      "#h": [channelId],
-      limit: opts.limit ?? 100,
-    };
-    if (opts.until) filter.until = opts.until;
-    if (opts.since) filter.since = opts.since;
+    const allEvents: NostrEvent[] = [];
 
-    const events = await this.pool.querySync(relays, filter as any);
-    return { events: events as unknown as NostrEvent[] };
+    await Promise.allSettled(
+      relays.map(async (r: string) => {
+        try {
+          await this.#ensureConnected(r);
+        } catch { return; }
+
+        const subId = `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const filter: Record<string, unknown> = { kinds: [9], "#h": [channelId], limit: opts.limit ?? 100 };
+        if (opts.until) filter.until = opts.until;
+        if (opts.since) filter.since = opts.since;
+
+        return new Promise<void>((resolve) => {
+          const q = { events: [] as NostrEvent[], eose: false, resolve };
+          this.#queries.set(subId, q);
+
+          const timer = setTimeout(() => {
+            if (!q.eose) { q.eose = true; allEvents.push(...q.events); this.#queries.delete(subId); resolve(); }
+          }, this.queryTimeoutMs);
+
+          const origResolve = q.resolve;
+          q.resolve = () => { clearTimeout(timer); allEvents.push(...q.events); this.#queries.delete(subId); origResolve(); };
+
+          this.#send(r, ["REQ", subId, filter]);
+        });
+      }),
+    );
+
+    return { events: allEvents };
   }
 
-  // ── Subscribe (kind 9 by #h) ──
-
   subscribe(opts: SubscribeAdapterOptions): NostrSubscription {
-    const relays = opts.relays ?? this.#config.relays;
+    const relays = opts.relays ?? this.relays;
     const channelId = this.channelFor(opts.target);
+    const subId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     let closed = false;
     let eventCb: ((event: NostrEvent) => void) | null = null;
     let eoseCb: (() => void) | null = null;
+    const wsList: WebSocket[] = [];
 
-    const closer = this.pool.subscribeMany(
-      relays,
-      [{ kinds: [9], "#h": [channelId], limit: 100 }] as any,
-      {
-        onevent: (event: any) => {
-          if (closed || !eventCb) return;
-          eventCb(event as unknown as NostrEvent);
-        },
-        oneose: () => {
-          if (closed || !eoseCb) return;
-          eoseCb();
-        },
-      },
-    );
+    const setup = async () => {
+      for (const r of relays) {
+        try {
+          await this.#ensureConnected(r);
+          const ws = this.#conns.get(r);
+          if (!ws) continue;
+          wsList.push(ws);
+
+          ws.on("message", (raw: Buffer) => {
+            let msg: unknown[];
+            try { msg = JSON.parse(raw.toString()); } catch { return; }
+            if (msg[0] === "EVENT" && msg[1] === subId) {
+              if (!closed && eventCb) eventCb(msg[2] as unknown as NostrEvent);
+              return;
+            }
+            if (msg[0] === "EOSE" && msg[1] === subId) {
+              if (!closed && eoseCb) eoseCb();
+              return;
+            }
+            // Pass other messages to the main handler
+            this.#handle(r, ws, raw.toString());
+          });
+
+          this.#send(r, ["REQ", subId, { kinds: [9], "#h": [channelId], limit: 100 }]);
+        } catch { /* skip */ }
+      }
+    };
+
+    setup();
 
     return {
-      on: (type: string, handler: any) => {
-        if (type === "event") eventCb = handler;
-        if (type === "eose") eoseCb = handler;
+      on: (type: string, handler: unknown) => {
+        if (type === "event") eventCb = handler as (event: NostrEvent) => void;
+        if (type === "eose") eoseCb = handler as () => void;
         return {} as NostrSubscription;
       },
       close: () => {
         closed = true;
-        closer.close();
+        for (let i = 0; i < wsList.length; i++) {
+          try { this.#send(relays[i], ["CLOSE", subId]); } catch { /* ignore */ }
+        }
       },
     };
   }
 
-  close(): void {
-    this.pool.close(this.#config.relays);
-  }
-
   // ── Channel management (NIP-29) ──
 
-  /**
-   * Create a Buzz group channel for a target.
-   * Returns the create event (kind 9007).
-   */
   async createChannel(opts: {
     target: string;
     name: string;
-    pubkey: string;
-    secretKey: Uint8Array;
     visibility?: "open" | "private" | "closed";
     relays?: string[];
   }): Promise<NostrEvent> {
-    const relays = opts.relays ?? this.#config.relays;
+    const relays = opts.relays ?? this.relays;
     const channelId = this.channelFor(opts.target);
-    const tags: string[][] = [
-      ["d", channelId],
-      ["name", opts.name],
-      ["visibility", opts.visibility ?? "open"],
-    ];
-
     const event = finalizeEvent(
       {
         kind: 9007,
         created_at: Math.floor(Date.now() / 1000),
-        tags,
+        tags: [["d", channelId], ["name", opts.name], ["visibility", opts.visibility ?? "open"]],
         content: "",
       },
-      opts.secretKey,
+      this.secretKey,
     );
 
-    await this.publish({ ...opts as any }); // just to send to relays
-    // Actually publish directly
-    const results = this.pool.publish(relays, event as any);
-    await Promise.allSettled(results.map(async (p) => { try { await p; } catch {} }));
+    await Promise.allSettled(
+      relays.map(async (r: string) => {
+        try { await this.#ensureConnected(r); this.#send(r, ["EVENT", event]); } catch { /* skip */ }
+      }),
+    );
 
     return event as unknown as NostrEvent;
   }
 
-  /**
-   * Join a Buzz channel (kind 9021 — open channel join request).
-   */
-  async joinChannel(opts: {
-    target: string;
-    pubkey: string;
-    secretKey: Uint8Array;
-    relays?: string[];
-  }): Promise<void> {
-    const relays = opts.relays ?? this.#config.relays;
+  async joinChannel(opts: { target: string; relays?: string[] }): Promise<void> {
+    const relays = opts.relays ?? this.relays;
     const channelId = this.channelFor(opts.target);
-
     const event = finalizeEvent(
-      {
-        kind: 9021,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [["h", channelId]],
-        content: "",
-      },
-      opts.secretKey,
+      { kind: 9021, created_at: Math.floor(Date.now() / 1000), tags: [["h", channelId]], content: "" },
+      this.secretKey,
     );
 
-    const results = this.pool.publish(relays, event as any);
-    await Promise.allSettled(results.map(async (p) => { try { await p; } catch {} }));
+    await Promise.allSettled(
+      relays.map(async (r: string) => {
+        try { await this.#ensureConnected(r); this.#send(r, ["EVENT", event]); } catch { /* skip */ }
+      }),
+    );
   }
 
-  #buildTags(opts: PublishAdapterOptions, channelId: string): string[][] {
-    const tags: string[][] = [];
-    tags.push(["h", channelId]);  // NIP-29 channel tag
-    tags.push(["p", opts.pubkey]);
-    tags.push(["client", opts.clientName]);
-    tags.push(["near_target", opts.target]);  // preserve for cross-adapter compatibility
-    tags.push(["t", opts.targetType]);
-    if (opts.nearAccountId) {
-      tags.push(["near_account", opts.nearAccountId]);
+  close(): void {
+    for (const [url, ws] of this.#conns) {
+      try { ws.close(); } catch { /* ignore */ }
+      this.#states.set(url, "disconnected");
     }
-    if (opts.parentEventId) {
-      // NIP-10 threading: e tag with root event
-      tags.push(["e", opts.parentEventId, "", "reply"]);
-    }
-    if (opts.extraTags) {
-      tags.push(...opts.extraTags);
-    }
-    return tags;
+    this.#conns.clear();
   }
 }
