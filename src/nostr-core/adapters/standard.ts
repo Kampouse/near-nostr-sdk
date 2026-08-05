@@ -131,6 +131,31 @@ export class StandardAdapter implements RelayAdapter {
     this.pool.close(this.relays);
   }
 
+  /** Raw query — pass any NostrFilter shape directly to SimplePool */
+  async queryRaw(filter: Record<string, unknown>, relays?: string[]): Promise<NostrEvent[]> {
+    const relayList = relays ?? this.relays;
+    return this.pool.querySync(relayList, filter as any) as unknown as NostrEvent[];
+  }
+
+  /** Fetch kind 0 profile for a pubkey */
+  async getProfile(pubkey: string): Promise<{
+    pubkey: string;
+    name?: string | null;
+    picture?: string | null;
+    about?: string | null;
+    nip05?: string | null;
+    website?: string | null;
+  } | null> {
+    try {
+      const events = await this.pool.querySync(this.relays, [{ kinds: [0], authors: [pubkey], limit: 1 }] as any);
+      if (events.length === 0) return null;
+      const parsed = JSON.parse(events[0].content);
+      return { pubkey, ...parsed };
+    } catch {
+      return null;
+    }
+  }
+
   #buildTags(opts: PublishAdapterOptions): string[][] {
     const tags: string[][] = [];
     // Standard tags first (relay-filterable)
