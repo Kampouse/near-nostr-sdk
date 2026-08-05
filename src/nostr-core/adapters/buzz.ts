@@ -174,14 +174,24 @@ export class BuzzAdapter implements RelayAdapter {
     const relays = opts.relays ?? this.relays;
     const channelId = this.channelFor(opts.target);
     const tags: string[][] = [
-      ["h", channelId],
-      ["p", opts.pubkey],
+      ["h", channelId],                             // NIP-29 channel ref
+      // Standard tags (relay-filterable)
+      ["t", opts.targetType],                       // topic
+      ["p", opts.pubkey],                           // pubkey ref: author
       ["client", opts.clientName],
-      ["near_target", opts.target],
-      ["t", opts.targetType],
     ];
+    if (opts.nearAccountId) {
+      tags.push(["p", `_near:${opts.nearAccountId}`]); // pubkey ref: NEAR account
+    }
+    if (opts.parentEventId) {
+      tags.push(["e", opts.parentEventId, "", "reply"]); // event ref: parent thread
+    }
+    if (opts.targetUrl) {
+      tags.push(["r", opts.targetUrl]);                   // URL ref
+    }
+    // App-specific tags
+    tags.push(["near_target", opts.target]);
     if (opts.nearAccountId) tags.push(["near_account", opts.nearAccountId]);
-    if (opts.parentEventId) tags.push(["e", opts.parentEventId, "", "reply"]);
     if (opts.extraTags) tags.push(...opts.extraTags);
 
     const event = finalizeEvent(

@@ -47,6 +47,7 @@ export type PublishAdapterOptions = {
   secretKey: Uint8Array;
   parentEventId?: string;
   nearAccountId?: string;
+  targetUrl?: string;     // include as "r" tag
   extraTags?: string[][];
   relays?: string[];
 };

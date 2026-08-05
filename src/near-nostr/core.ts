@@ -208,6 +208,7 @@ export class NearNostr {
       secretKey: opts.nostrSecretKey,
       parentEventId: opts.parentEventId,
       nearAccountId: opts.nearAccountId,
+      targetUrl: opts.target.url,
       relays: opts.relays,
     });
 

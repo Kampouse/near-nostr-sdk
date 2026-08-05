@@ -133,16 +133,24 @@ export class StandardAdapter implements RelayAdapter {
 
   #buildTags(opts: PublishAdapterOptions): string[][] {
     const tags: string[][] = [];
-    tags.push(["client", opts.clientName]);
-    tags.push(["near_target", opts.target]);
-    tags.push(["t", opts.targetType]);
-    tags.push(["t", opts.clientName]);
-    tags.push(["p", opts.pubkey]);
+    // Standard tags first (relay-filterable)
+    tags.push(["t", opts.targetType]);            // topic: project, builder, scope, etc.
+    tags.push(["t", opts.clientName]);            // topic: client attribution
+    tags.push(["p", opts.pubkey]);                // pubkey ref: event author
     if (opts.nearAccountId) {
-      tags.push(["near_account", opts.nearAccountId]);
+      tags.push(["p", `_near:${opts.nearAccountId}`]); // pubkey ref: NEAR account (namespaced)
     }
     if (opts.parentEventId) {
-      tags.push(["e", opts.parentEventId, "", "reply"]);
+      tags.push(["e", opts.parentEventId, "", "reply"]); // event ref: parent thread
+    }
+    if (opts.targetUrl) {
+      tags.push(["r", opts.targetUrl]);                 // URL ref
+    }
+    // App-specific tags (client-side filtering, relay may ignore)
+    tags.push(["client", opts.clientName]);
+    tags.push(["near_target", opts.target]);      // e.g. "project:123"
+    if (opts.nearAccountId) {
+      tags.push(["near_account", opts.nearAccountId]);
     }
     if (opts.extraTags) {
       tags.push(...opts.extraTags);
