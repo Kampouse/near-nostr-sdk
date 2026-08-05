@@ -67,7 +67,7 @@ export class NearNostr {
 
   /**
    * Generate a binding challenge for a NEAR account.
-   * Client signs this with their nsec, returns the signature to the server.
+   * The client signs this as a kind 0 event (or any event with the challenge in content/tags).
    */
   createBindingChallenge(nearAccountId: string): { challenge: string; expiresAt: number } {
     const expiresAt = Math.floor(Date.now() / 1000) + 300; // 5 min
@@ -76,27 +76,33 @@ export class NearNostr {
   }
 
   /**
-   * Verify a Nostr signature against a binding challenge.
-   * The client should sign the challenge bytes with `nostr-tools/pure` getSignature.
-   * Returns the parsed challenge data if valid, throws if invalid/expired/forged.
+   * Verify a binding proof — a signed Nostr event containing the challenge.
+   * Works with any signer (extension, nsec, NIP-46 remote).
    */
-  verifyBindingChallenge(opts: {
-    nostrPubkey: string;
-    challenge: string;
-    signature: string; // hex-encoded 64-byte schnorr signature
-  }): { nearAccountId: string; expiresAt: number; clientName: string } {
-    const { schnorr } = require("@noble/curves/secp256k1");
+  verifyBindingEvent(event: {
+    id: string;
+    pubkey: string;
+    content: string;
+    tags: string[][];
+    created_at: number;
+    sig: string;
+  }): { nearAccountId: string; expiresAt: number; clientName: string; nostrPubkey: string } {
+    const { verifyEvent } = require("nostr-tools/pure");
 
-    const pub = Uint8Array.from(Buffer.from(opts.nostrPubkey, "hex"));
-    const sig = Uint8Array.from(Buffer.from(opts.signature, "hex"));
-    const msg = new TextEncoder().encode(opts.challenge);
-
-    const valid = schnorr.verify(sig, msg, pub);
-    if (!valid) {
-      throw new Error("Invalid Nostr signature for binding challenge");
+    // Must be a valid signed event
+    if (!verifyEvent(event as any)) {
+      throw new Error("Invalid Nostr event signature");
     }
 
-    const parts = opts.challenge.split(":");
+    // Extract challenge from tags
+    const challengeTag = event.tags.find((t) => t[0] === "challenge");
+    const challenge = challengeTag?.[1] ?? event.content;
+    if (!challenge || !challenge.startsWith("bind:")) {
+      throw new Error("No binding challenge found in event");
+    }
+
+    // Parse challenge
+    const parts = challenge.split(":");
     if (parts.length !== 4 || parts[0] !== "bind") {
       throw new Error("Malformed binding challenge");
     }
@@ -110,6 +116,26 @@ export class NearNostr {
       nearAccountId: parts[1],
       expiresAt,
       clientName: parts[3],
+      nostrPubkey: event.pubkey,
+    };
+  }
+
+  /**
+   * Build a binding event template for a signer to sign.
+   * Pass to `signer.signEvent(template)` — works with extension, nsec, or NIP-46.
+   */
+  buildBindingEventTemplate(opts: {
+    nostrPubkey: string;
+    challenge: string;
+  }): { kind: number; created_at: number; tags: string[][]; content: string } {
+    return {
+      kind: 27235, // ephemeral binding event (won't be relayed)
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["challenge", opts.challenge],
+        ["client", this.config.clientName],
+      ],
+      content: opts.challenge,
     };
   }
 
