@@ -1,0 +1,36 @@
+{
+  "name": "near-nostr-sdk",
+  "version": "0.1.0",
+  "description": "NEAR <> Nostr integration SDK — comments, feeds, and messaging backed by public relays",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./nostr-core": {
+      "types": "./dist/nostr-core/index.d.ts",
+      "import": "./dist/nostr-core/index.js"
+    },
+    "./near-nostr": {
+      "types": "./dist/near-nostr/index.d.ts",
+      "import": "./dist/near-nostr/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.10.0"
+  },
+  "peerDependencies": {},
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}
