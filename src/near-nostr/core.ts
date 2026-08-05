@@ -140,21 +140,21 @@ export class NearNostr {
   }
 
   /**
-   * Build the KV contract call args for a binding.
+   * Build the FastNear KV write args for a binding.
+   * Uses __fastdata_kv — no contract deploy needed, any account works as namespace.
    * The caller must sign + send the NEAR transaction via wallet.
    */
   buildBindingArgs(opts: {
     nearAccountId: string;
     nostrPubkey: string;
-    proof: string; // the signed challenge JSON
+    proof: string;
     relay?: string;
-  }): { contract: string; method: string; args: Record<string, string> } {
+  }): { contract: string; method: string; args: Record<string, unknown> } {
     return {
       contract: this.config.bindingContract,
-      method: "set",
+      method: "__fastdata_kv",
       args: {
-        key: `nostr/${opts.nearAccountId}`,
-        value: JSON.stringify({
+        [`nostr/${opts.nearAccountId}`]: JSON.stringify({
           npub: opts.nostrPubkey,
           relay: opts.relay ?? this.config.relays[0],
           proof: opts.proof,
@@ -284,18 +284,23 @@ export class NearNostr {
   async #fetchBinding(nearAccountId: string): Promise<NearNostrBinding | null> {
     try {
       const res = await fetch(
-        `${this.config.kvApiUrl}/v1/account/${this.config.bindingContract}/nostr/${nearAccountId}`,
+        `${this.config.kvApiUrl}/v0/latest/${this.config.bindingContract}/${nearAccountId}/nostr/${nearAccountId}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
       );
-      if (!res.ok) return null;
+      if (!res.ok || res.status === 404) return null;
       const data = await res.json();
-      if (!data?.value) return null;
-      const parsed = JSON.parse(data.value);
+      const entry = data?.entries?.[0];
+      if (!entry?.value) return null;
+      const parsed =
+        typeof entry.value === "string"
+          ? JSON.parse(entry.value)
+          : entry.value;
       return {
         nearAccountId,
-        nostrPubkey: parsed.npub,
-        relay: parsed.relay,
-        proof: parsed.proof,
-        boundAt: parsed.bound_at,
+        nostrPubkey: parsed.npub ?? parsed.value?.npub,
+        relay: parsed.relay ?? parsed.value?.relay,
+        proof: parsed.proof ?? parsed.value?.proof,
+        boundAt: parsed.bound_at ?? parsed.value?.bound_at,
       };
     } catch {
       return null;
