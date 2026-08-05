@@ -25,6 +25,9 @@ export interface RelayAdapter {
   /** Sign and publish an event. Adapter translates to the right kind/tags. */
   publish(opts: PublishAdapterOptions): Promise<PublishResult>;
 
+  /** Publish a pre-signed event (signed client-side by extension/nsec). */
+  publishSigned(event: NostrEvent, relays?: string[]): Promise<PublishResult>;
+
   /** Query events. Adapter translates filters to relay-specific shape. */
   query(opts: QueryAdapterOptions): Promise<QueryResult>;
 

@@ -205,6 +205,23 @@ export class BuzzAdapter implements RelayAdapter {
     return { event: event as unknown as NostrEvent, statuses };
   }
 
+  async publishSigned(event: NostrEvent, relays?: string[]): Promise<PublishResult> {
+    const relayList = relays ?? this.relays;
+    const statuses = new Map<string, boolean>();
+    await Promise.allSettled(
+      relayList.map(async (r: string) => {
+        try {
+          await this.#ensureConnected(r);
+          this.#send(r, ["EVENT", event]);
+          statuses.set(r, true);
+        } catch {
+          statuses.set(r, false);
+        }
+      }),
+    );
+    return { event, statuses };
+  }
+
   async query(opts: QueryAdapterOptions): Promise<{ events: NostrEvent[] }> {
     const relays = opts.relays ?? this.relays;
     const channelId = this.channelFor(opts.target);
@@ -295,6 +312,36 @@ export class BuzzAdapter implements RelayAdapter {
   }
 
   // ── Channel management (NIP-29) ──
+
+  async listChannels(relays?: string[]): Promise<NostrEvent[]> {
+    const relayList = relays ?? this.relays;
+    const allEvents: NostrEvent[] = [];
+
+    await Promise.allSettled(
+      relayList.map(async (r: string) => {
+        try {
+          await this.#ensureConnected(r);
+        } catch { return; }
+
+        const subId = `ch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        return new Promise<void>((resolve) => {
+          const q = { events: [] as NostrEvent[], eose: false, resolve };
+          this.#queries.set(subId, q);
+
+          const timer = setTimeout(() => {
+            if (!q.eose) { q.eose = true; allEvents.push(...q.events); this.#queries.delete(subId); resolve(); }
+          }, 5_000);
+
+          const origResolve = q.resolve;
+          q.resolve = () => { clearTimeout(timer); allEvents.push(...q.events); this.#queries.delete(subId); origResolve(); };
+
+          this.#send(r, ["REQ", subId, { kinds: [9007], limit: 100 }]);
+        });
+      }),
+    );
+
+    return allEvents;
+  }
 
   async createChannel(opts: {
     target: string;

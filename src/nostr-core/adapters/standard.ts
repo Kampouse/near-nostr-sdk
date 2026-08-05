@@ -54,6 +54,23 @@ export class StandardAdapter implements RelayAdapter {
     return { event: event as unknown as NostrEvent, statuses };
   }
 
+  async publishSigned(event: NostrEvent, relays?: string[]): Promise<PublishResult> {
+    const relayList = relays ?? this.relays;
+    const results = this.pool.publish(relayList, event as any);
+    const statuses = new Map<string, boolean>();
+    await Promise.allSettled(
+      results.map(async (p, i) => {
+        try {
+          await p;
+          statuses.set(relayList[i], true);
+        } catch {
+          statuses.set(relayList[i], false);
+        }
+      }),
+    );
+    return { event, statuses };
+  }
+
   async query(opts: QueryAdapterOptions): Promise<{ events: NostrEvent[] }> {
     const relays = opts.relays ?? this.relays;
     const filter: NostrFilter = {
