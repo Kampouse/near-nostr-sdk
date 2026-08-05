@@ -225,26 +225,38 @@ export class NearNostr {
     since?: number;
     relays?: string[];
     adapterType?: "standard" | "buzz";
+    /** Filter to only show comments from users with a near_account tag (no KV check) */
+    requireBound?: boolean;
+    /** Filter to only show comments from users with verified KV binding (slower, bulletproof) */
+    requireVerified?: boolean;
   }): Promise<NearNostrComment[]> {
     const adapter = this.getAdapter(opts.adapterType);
     const targetKey = `${opts.target.type}:${opts.target.id}`;
+
+    // Fetch more if we'll be filtering out unbound
+    const fetchLimit = (opts.requireBound || opts.requireVerified)
+      ? (opts.limit ?? 50) * 3
+      : opts.limit;
 
     const { events } = await adapter.query({
       target: targetKey,
       targetType: opts.target.type,
       clientName: this.config.clientName,
-      limit: opts.limit,
+      limit: fetchLimit,
       until: opts.until,
       since: opts.since,
       relays: opts.relays,
     });
 
-    const comments: NearNostrComment[] = [];
+    let comments: NearNostrComment[] = [];
     for (const event of events) {
       const parentTag = event.tags.find(
         (t) => t[0] === "e" && t[3] === "reply",
       );
       const nearAccount = event.tags.find((t) => t[0] === "near_account")?.[1];
+
+      // requireBound: skip comments without near_account tag
+      if (opts.requireBound && !nearAccount) continue;
 
       comments.push({
         eventId: event.id,
@@ -257,8 +269,29 @@ export class NearNostr {
       });
     }
 
+    // requireVerified: batch-check KV bindings
+    if (opts.requireVerified) {
+      const accounts = [...new Set(
+        comments.filter((c) => c.nearAccountId).map((c) => c.nearAccountId!),
+      )];
+      const BATCH = 5;
+      const verified = new Set<string>();
+      for (let i = 0; i < accounts.length; i += BATCH) {
+        const batch = accounts.slice(i, i + BATCH);
+        const results = await Promise.allSettled(
+          batch.map((acc) => this.#fetchBinding(acc)),
+        );
+        results.forEach((r, idx) => {
+          if (r.status === "fulfilled" && r.value) {
+            verified.add(batch[idx]);
+          }
+        });
+      }
+      comments = comments.filter((c) => c.nearAccountId && verified.has(c.nearAccountId));
+    }
+
     comments.sort((a, b) => b.createdAt - a.createdAt);
-    return comments;
+    return comments.slice(0, opts.limit);
   }
 
   /**
