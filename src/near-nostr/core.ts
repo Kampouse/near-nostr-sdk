@@ -262,6 +262,37 @@ export class NearNostr {
   }
 
   /**
+   * Batch-resolve Nostr kind 0 profiles for a list of comments.
+   * Deduplicates pubkeys to avoid redundant relay queries.
+   */
+  async enrichComments(
+    comments: NearNostrComment[],
+  ): Promise<(NearNostrComment & { profile?: NearNostrIdentity["profile"] })[]> {
+    // Deduplicate pubkeys
+    const uniquePubkeys = [...new Set(comments.map((c) => c.pubkey))];
+    const profileMap = new Map<string, NearNostrIdentity["profile"]>();
+
+    // Batch fetch profiles in parallel (max 5 concurrent)
+    const BATCH = 5;
+    for (let i = 0; i < uniquePubkeys.length; i += BATCH) {
+      const batch = uniquePubkeys.slice(i, i + BATCH);
+      const results = await Promise.allSettled(
+        batch.map((pk) => this.#fetchProfile(pk)),
+      );
+      results.forEach((r, idx) => {
+        if (r.status === "fulfilled" && r.value) {
+          profileMap.set(batch[idx], r.value);
+        }
+      });
+    }
+
+    return comments.map((c) => ({
+      ...c,
+      profile: profileMap.get(c.pubkey),
+    }));
+  }
+
+  /**
    * Subscribe to comments on a target.
    */
   subscribeComments(opts: {
