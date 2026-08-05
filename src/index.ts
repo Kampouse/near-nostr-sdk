@@ -1,9 +1,23 @@
+// ── nostr-core ──
 export { NostrCore } from "./nostr-core/core.js";
-export { NearNostr } from "./near-nostr/core.js";
-
 export type { NostrEvent, UnsignedNostrEvent, NostrFilter, RelayMessage, ConnectionResult } from "./nostr-core/types.js";
 export { Kind } from "./nostr-core/types.js";
+export type { NostrSubscription } from "./nostr-core/core.js";
+export { StandardAdapter } from "./nostr-core/adapters/standard.js";
+export { BuzzAdapter } from "./nostr-core/adapters/buzz.js";
+export type {
+  RelayAdapter,
+  RelayAdapterConfig,
+  PublishResult,
+  QueryResult,
+  PublishAdapterOptions,
+  QueryAdapterOptions,
+  SubscribeAdapterOptions,
+} from "./nostr-core/adapters/types.js";
+export type { BuzzAdapterConfig } from "./nostr-core/adapters/buzz.js";
 
+// ── near-nostr ──
+export { NearNostr } from "./near-nostr/core.js";
 export type {
   NearNostrTarget,
   NearNostrTargetType,

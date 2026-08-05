@@ -1,6 +1,7 @@
-import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
+import { getPublicKey } from "nostr-tools/pure";
 import { NostrCore } from "../nostr-core/core.js";
 import type { NostrEvent, NostrFilter } from "../nostr-core/types.js";
+import type { RelayAdapter, PublishAdapterOptions, QueryAdapterOptions, SubscribeAdapterOptions } from "../nostr-core/adapters/types.js";
 import type {
   NearNostrConfig,
   NearNostrTarget,
@@ -21,38 +22,12 @@ const DEFAULT_RELAYS = [
 
 const DEFAULT_KV_API = "https://kv.main.fastnear.com";
 
-// ── Tag builders ──
-
-function buildTargetTags(target: NearNostrTarget, clientName: string): string[][] {
-  const tags: string[][] = [];
-
-  tags.push(["client", clientName]);
-  tags.push(["near_target", `${target.type}:${target.id}`]);
-  tags.push(["t", target.type]);
-  tags.push(["t", "nearbuilders"]);
-
-  if (target.url) {
-    tags.push(["r", target.url]);
-  }
-
-  return tags;
-}
-
-function targetFilterTags(target: NearNostrTarget): NostrFilter {
-  // Some relays reject unknown custom tags in filters.
-  // Use standard tags for relay query, filter near_target client-side.
-  return {
-    kinds: [1],
-    "#t": [target.type, "nearbuilders"],
-    limit: 100,
-  };
-}
-
 // ── NearNostr ──
 
 export class NearNostr {
   readonly core: NostrCore;
   readonly config: Required<Pick<NearNostrConfig, "relays" | "kvApiUrl" | "nearRpc" | "bindingContract" | "clientName">>;
+  readonly adapters: Map<string, RelayAdapter>;
 
   constructor(config?: NearNostrConfig) {
     const relays = config?.relays ?? DEFAULT_RELAYS;
@@ -64,6 +39,28 @@ export class NearNostr {
       bindingContract: config?.bindingContract ?? "contextual.near",
       clientName: config?.clientName ?? "near-nostr-sdk",
     };
+    this.adapters = new Map();
+  }
+
+  // ── Adapter management ──
+
+  /** Register a relay adapter (standard, buzz, custom) */
+  useAdapter(adapter: RelayAdapter): this {
+    this.adapters.set(adapter.type, adapter);
+    return this;
+  }
+
+  /** Get adapter by type, falls back to first registered or creates default StandardAdapter */
+  getAdapter(type?: "standard" | "buzz"): RelayAdapter {
+    if (type && this.adapters.has(type)) {
+      return this.adapters.get(type)!;
+    }
+    // Default: create a StandardAdapter on the fly using the core pool
+    // (lazy — avoids creating a pool until needed)
+    if (this.adapters.size > 0) {
+      return this.adapters.values().next().value!;
+    }
+    throw new Error("No adapter registered. Call .useAdapter() first.");
   }
 
   // ── Identity: link NEAR account → Nostr pubkey ──
@@ -107,8 +104,12 @@ export class NearNostr {
     };
   }
 
-  // ── Comments ──
+  // ── Comments (adapter-aware) ──
 
+  /**
+   * Create a comment on a target via the specified adapter.
+   * If adapterType is not specified, uses the first registered adapter.
+   */
   async createComment(opts: {
     target: NearNostrTarget;
     content: string;
@@ -116,55 +117,53 @@ export class NearNostr {
     nostrSecretKey: Uint8Array;
     parentEventId?: string;
     relays?: string[];
+    adapterType?: "standard" | "buzz";
   }): Promise<NostrEvent> {
-    const tags = buildTargetTags(opts.target, this.config.clientName);
-
-    if (opts.parentEventId) {
-      tags.push(["e", opts.parentEventId, "", "reply"]);
-    }
-
+    const adapter = this.getAdapter(opts.adapterType);
+    const targetKey = `${opts.target.type}:${opts.target.id}`;
     const pubkey = getPublicKey(opts.nostrSecretKey);
-    tags.push(["p", pubkey]);
-    tags.push(["near_account", opts.nearAccountId]);
 
-    const template = {
-      kind: 1,
-      created_at: Math.floor(Date.now() / 1000),
-      tags,
+    const result = await adapter.publish({
       content: opts.content,
-    };
+      target: targetKey,
+      targetType: opts.target.type,
+      clientName: this.config.clientName,
+      pubkey,
+      secretKey: opts.nostrSecretKey,
+      parentEventId: opts.parentEventId,
+      nearAccountId: opts.nearAccountId,
+      relays: opts.relays,
+    });
 
-    const event = finalizeEvent(template as any, opts.nostrSecretKey);
-
-    await this.core.publishEvent({ event: event as unknown as NostrEvent, relays: opts.relays ?? this.config.relays });
-
-    return event as unknown as NostrEvent;
+    return result.event;
   }
 
+  /**
+   * List comments on a target via the specified adapter.
+   */
   async listComments(opts: {
     target: NearNostrTarget;
     limit?: number;
     until?: number;
+    since?: number;
     relays?: string[];
+    adapterType?: "standard" | "buzz";
   }): Promise<NearNostrComment[]> {
-    const filter = targetFilterTags(opts.target);
-    if (opts.limit) filter.limit = opts.limit;
-    if (opts.until) filter.until = opts.until;
+    const adapter = this.getAdapter(opts.adapterType);
+    const targetKey = `${opts.target.type}:${opts.target.id}`;
 
-    const events = await this.core.queryEvents({
-      filters: filter,
-      relays: opts.relays ?? this.config.relays,
+    const { events } = await adapter.query({
+      target: targetKey,
+      targetType: opts.target.type,
+      clientName: this.config.clientName,
+      limit: opts.limit,
+      until: opts.until,
+      since: opts.since,
+      relays: opts.relays,
     });
 
     const comments: NearNostrComment[] = [];
-    const targetKey = `${opts.target.type}:${opts.target.id}`;
     for (const event of events) {
-      // Client-side filter: match near_target tag
-      const hasTarget = event.tags.some(
-        (t) => t[0] === "near_target" && t[1] === targetKey,
-      );
-      if (!hasTarget) continue;
-
       const parentTag = event.tags.find(
         (t) => t[0] === "e" && t[3] === "reply",
       );
@@ -181,10 +180,27 @@ export class NearNostr {
       });
     }
 
-    // Sort newest first
     comments.sort((a, b) => b.createdAt - a.createdAt);
-
     return comments;
+  }
+
+  /**
+   * Subscribe to comments on a target.
+   */
+  subscribeComments(opts: {
+    target: NearNostrTarget;
+    relays?: string[];
+    adapterType?: "standard" | "buzz";
+  }): import("../nostr-core/core.js").NostrSubscription {
+    const adapter = this.getAdapter(opts.adapterType);
+    const targetKey = `${opts.target.type}:${opts.target.id}`;
+
+    return adapter.subscribe({
+      target: targetKey,
+      targetType: opts.target.type,
+      clientName: this.config.clientName,
+      relays: opts.relays,
+    });
   }
 
   // ── Internal: fetch binding from FastNear KV ──
