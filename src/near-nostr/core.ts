@@ -347,8 +347,7 @@ export class NearNostr {
   async #fetchBinding(nearAccountId: string): Promise<NearNostrBinding | null> {
     try {
       const res = await fetch(
-        `${this.config.kvApiUrl}/v0/latest/${this.config.bindingContract}/${nearAccountId}/nostr/${nearAccountId}`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+        `${this.config.kvApiUrl}/v0/latest/${this.config.bindingContract}/nostr/${nearAccountId}`,
       );
       if (!res.ok || res.status === 404) return null;
       const data = await res.json();
