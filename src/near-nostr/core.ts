@@ -1,4 +1,4 @@
-import { getPublicKey } from "nostr-tools/pure";
+import { getPublicKey, verifyEvent } from "nostr-tools/pure";
 import { NostrCore } from "../nostr-core/core.js";
 import type { NostrEvent, NostrFilter } from "../nostr-core/types.js";
 import type { RelayAdapter, PublishAdapterOptions, QueryAdapterOptions, SubscribeAdapterOptions } from "../nostr-core/adapters/types.js";
@@ -87,8 +87,6 @@ export class NearNostr {
     created_at: number;
     sig: string;
   }): { nearAccountId: string; expiresAt: number; clientName: string; nostrPubkey: string } {
-    const { verifyEvent } = require("nostr-tools/pure");
-
     // Must be a valid signed event
     if (!verifyEvent(event as any)) {
       throw new Error("Invalid Nostr event signature");
