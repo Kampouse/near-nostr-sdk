@@ -20,7 +20,7 @@ export type { BuzzAdapterConfig } from "./nostr-core/adapters/buzz.js";
 export type { NostrSigner, WindowNostr } from "./nostr-core/signers/types.js";
 export { LocalSigner } from "./nostr-core/signers/local-signer.js";
 export { ExtensionSigner } from "./nostr-core/signers/extension-signer.js";
-export { detectNostrExtension } from "./nostr-core/signers/types.js";
+export { detectNostrExtension, waitForNostrExtension } from "./nostr-core/signers/types.js";
 
 // ── near-nostr ──
 export { NearNostr } from "./near-nostr/core.js";

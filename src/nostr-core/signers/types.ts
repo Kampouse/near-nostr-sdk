@@ -40,10 +40,33 @@ export interface WindowNostr {
 /** Detect if a Nostr extension is available in the browser */
 export function detectNostrExtension(): WindowNostr | null {
   if (typeof window === "undefined") return null;
-  // nos2x, Alby, Amber all set window.nostr
-  const ext = (window as any).nostr as WindowNostr | undefined;
+  // nos2x, Alby, Amber, Diogel, Soapbox — all set window.nostr (NIP-07)
+  const win = window as any;
+  const ext = win.nostr as WindowNostr | undefined;
   if (ext && typeof ext.getPublicKey === "function" && typeof ext.signEvent === "function") {
     return ext;
   }
+  // Some Firefox extensions use window.nostrWallet
+  const wallet = win.nostrWallet as WindowNostr | undefined;
+  if (wallet && typeof wallet.getPublicKey === "function" && typeof wallet.signEvent === "function") {
+    return wallet;
+  }
   return null;
+}
+
+/** Poll for a Nostr extension — useful on Firefox where injection may be delayed */
+export function waitForNostrExtension(timeoutMs = 3000): Promise<WindowNostr | null> {
+  return new Promise((resolve) => {
+    const existing = detectNostrExtension();
+    if (existing) return resolve(existing);
+
+    const start = Date.now();
+    const poll = setInterval(() => {
+      const ext = detectNostrExtension();
+      if (ext || Date.now() - start > timeoutMs) {
+        clearInterval(poll);
+        resolve(ext ?? null);
+      }
+    }, 200);
+  });
 }
